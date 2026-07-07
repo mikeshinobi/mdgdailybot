@@ -36,6 +36,7 @@ import re
 import datetime
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from PIL import Image
 
@@ -91,10 +92,20 @@ def http_post_json(url, payload, headers):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            raw = resp.read().decode("utf-8")
+            status = resp.status
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         print(f"HTTP {e.code} error calling {url}:\n{body}", file=sys.stderr)
+        raise
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"Warning: got HTTP {status} from {url} but the body wasn't valid JSON.", file=sys.stderr)
+        print(f"----- Raw response body ({len(raw)} chars) -----", file=sys.stderr)
+        print(raw if raw else "(completely empty)", file=sys.stderr)
+        print("-------------------------------------------------", file=sys.stderr)
         raise
 
 
@@ -179,6 +190,14 @@ You must respond with ONLY a JSON object (no markdown fences, no commentary) wit
                "alt": short accessibility alt text describing the image
 
 The post should be genuinely useful or interesting, around 500-800 words.
+
+CRITICAL: your entire reply must be a single valid JSON object that a strict JSON parser can
+read. Inside "html_body" specifically: use single quotes for any HTML attributes (e.g.
+<img alt='like this'>, not <img alt="like this">), and make sure any apostrophes or double
+quotes that appear in the visible text (e.g. "don't", a quoted phrase) are properly
+backslash-escaped so they don't break the JSON string. Never use a bare double-quote character
+as a shorthand for inches or feet (e.g. do not write 6" or 12" -- write "6 inches" or "12 in."
+as words instead). Double-check this before responding.
 Do not write about any of these recent topics (already covered):
 {avoid_list}
 """
@@ -197,12 +216,35 @@ Do not write about any of these recent topics (already covered):
         "anthropic-version": "2023-06-01",
     }
 
-    result = http_post_json("https://api.anthropic.com/v1/messages", payload, headers)
-    text = "".join(block["text"] for block in result["content"] if block["type"] == "text")
+    max_attempts = 2
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        result = http_post_json("https://api.anthropic.com/v1/messages", payload, headers)
+        text = "".join(block["text"] for block in result["content"] if block["type"] == "text")
 
-    # Claude is asked to return pure JSON; strip accidental code fences just in case.
-    cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-    post = json.loads(cleaned)
+        # Claude is asked to return pure JSON; strip accidental code fences just in case.
+        cleaned = re.sub(r"^```(json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+
+        try:
+            post = json.loads(cleaned)
+            break
+        except json.JSONDecodeError as e:
+            last_error = e
+            print(f"Warning: Claude's response wasn't valid JSON (attempt {attempt}/{max_attempts}): {e}", file=sys.stderr)
+            if attempt == max_attempts:
+                print("----- Raw response that failed to parse -----", file=sys.stderr)
+                print(text, file=sys.stderr)
+                print("----------------------------------------------", file=sys.stderr)
+                raise
+            # Ask Claude to fix its own output rather than starting over from scratch.
+            payload["messages"] = payload["messages"] + [
+                {"role": "assistant", "content": text},
+                {"role": "user", "content": (
+                    f"That response was not valid JSON -- Python's json.loads() failed with: {e}. "
+                    "Reply again with ONLY a corrected, strictly valid JSON object (same keys as "
+                    "before), fixing whatever broke the JSON (likely an unescaped quote or apostrophe)."
+                )},
+            ]
 
     images = post["images"][:MAX_IMAGES]
     if not images:
@@ -376,7 +418,39 @@ def create_wp_post(title, html_body, featured_media_id, category_id):
     if category_id:
         payload["categories"] = [category_id]
     headers = {**wp_auth_header(), "Content-Type": "application/json"}
-    return http_post_json(url, payload, headers)
+
+    try:
+        return http_post_json(url, payload, headers)
+    except json.JSONDecodeError:
+        # WordPress (or a plugin/host in front of it) sometimes garbles the response even
+        # though the post was actually created successfully. Before giving up, check whether
+        # a matching post now exists -- if so, treat this as a success, not a failure.
+        print("Response wasn't readable JSON; checking whether the post was created anyway...", file=sys.stderr)
+        found = find_post_by_title(title)
+        if found:
+            print(f"Confirmed: the post exists on WordPress (ID {found['id']}), despite the bad response.", file=sys.stderr)
+            return found
+        raise
+
+
+def find_post_by_title(title, statuses=("publish", "draft", "pending", "future")):
+    """Looks for a post with an exact title match, across the given statuses."""
+    status_param = ",".join(statuses)
+    url = (
+        f"{WP_BASE_URL}/wp-json/wp/v2/posts"
+        f"?search={urllib.parse.quote(title)}&status={status_param}&per_page=5&_fields=id,link,title"
+    )
+    try:
+        results = http_get_json(url, headers=wp_auth_header())
+    except Exception as e:
+        print(f"Warning: could not verify post existence ({e})", file=sys.stderr)
+        return None
+
+    for r in results:
+        rendered_title = re.sub("<.*?>", "", r["title"]["rendered"]).strip()
+        if rendered_title == title.strip():
+            return r
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +480,7 @@ def main():
     print(f"Creating WordPress post (status={POST_STATUS})...")
     post = create_wp_post(title, html_body, featured_media_id, category_id)
 
-    print(f"Done! Post ID {post['id']}: {post['link']}")
+    print(f"Done! Post ID {post['id']}: {post.get('link', '(link unavailable)')}")
 
 
 if __name__ == "__main__":
