@@ -3,7 +3,7 @@ name: Daily WordPress Post
 on:
   schedule:
     # Runs at 13:00 UTC every day (~9am US Eastern). Edit the cron to taste.
-    - cron: "0 13 * * *"
+    - cron: "15 13 * * *"
     
     # Twice a day (9am and 6pm UTC)
     #- cron: "0 9 * * *"
