@@ -58,4 +58,5 @@ jobs:
             - Never use generic transitional phrases like "in today's world," "it's important to note," "let's dive in," or similar filler openers.
             - Don't hedge every claim with counterpoints -- commit to a point of view where reasonable
             - Vary sentence length noticeably -- mix short, punchy sentences with longer ones. Avoid uniform paragraph lengths.
+            - Try not to end the post title with something in parentheses too often
         run: python generate_daily_post.py
