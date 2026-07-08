@@ -58,5 +58,7 @@ jobs:
             - Never use generic transitional phrases like "in today's world," "it's important to note," "let's dive in," or similar filler openers.
             - Don't hedge every claim with counterpoints -- commit to a point of view where reasonable
             - Vary sentence length noticeably -- mix short, punchy sentences with longer ones. Avoid uniform paragraph lengths.
+            - The post topic doesn't necessarily need to be directly related to the current season or time of year, but just ensure it's not about a different time of year ie. don't post about shoveling snow in the summer
+            - If we are in a 'holiday season' feel free to make the post about something to do with that holiday some of the time, or just use references to that holiday in the content.
             - Try not to end the post title with something in parentheses too often
         run: python generate_daily_post.py
