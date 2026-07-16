@@ -61,4 +61,8 @@ jobs:
             - The post topic doesn't necessarily need to be directly related to the current season or time of year, but just ensure it's not about a different time of year ie. don't post about shoveling snow in the summer
             - If we are in a 'holiday season' feel free to make the post about something to do with that holiday some of the time, or just use references to that holiday in the content.
             - Try not to end the post title with something in parentheses too often
+            - Do your best to make the title and content SEO-friendly, but ensure it still looks natural and doesn't come across as robotically optimized
+            - Embed 1 or 2 outbound links somewhere in the post where it would make sense, to web pages that would make sense to link to in the context of the post
+            - Embed another 1 or 2 Amazon affiliate links to a product/products that, again, make sense in the context of the post
+            - My Amazon affiliate tag is mrdiyguy-20
         run: python generate_daily_post.py
