@@ -96,6 +96,7 @@ def http_post_json(url, payload, headers):
             status = resp.status
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
+        e.body_text = body  # stash it -- the underlying stream can't be read twice
         print(f"HTTP {e.code} error calling {url}:\n{body}", file=sys.stderr)
         raise
 
@@ -161,9 +162,31 @@ def generate_post(recent_titles, categories):
     today_str = datetime.date.today().strftime("%A, %B %d, %Y")
     category_list = ", ".join(c["name"] for c in categories) if categories else "(none exist yet)"
 
+    parens_count = sum(1 for t in recent_titles if "(" in t)
+    PARENS_LIMIT = 3
+    if recent_titles and parens_count >= PARENS_LIMIT:
+        parens_instruction = (
+            f"{parens_count} of your last {len(recent_titles)} post titles already used "
+            f"parentheses (limit: at most {PARENS_LIMIT} per 10). Do NOT use parentheses in "
+            "this post's title -- use a different title structure instead."
+        )
+    elif recent_titles:
+        parens_instruction = (
+            f"{parens_count} of your last {len(recent_titles)} post titles used parentheses "
+            f"(limit: at most {PARENS_LIMIT} per 10). You may use a parenthetical title if it "
+            "genuinely fits this post, but most titles should not use one."
+        )
+    else:
+        parens_instruction = (
+            f"Use parentheses in a post title only occasionally (at most {PARENS_LIMIT} out of "
+            "every 10 posts), and only when it genuinely fits -- most titles should not use one."
+        )
+
     system_prompt = f"""You are a content writer for a website about: {SITE_TOPIC}.
 Your writing voice is: {SITE_VOICE}.
-Today's date is: {today_str}.
+Today's date is: {today_str}. Where it fits naturally, let this influence your topic choice --
+e.g. lean into a season, upcoming holiday, or time-of-year-relevant angle. Don't force it if
+the topic doesn't call for it.
 
 Additional rules and instructions you must follow:
 {SITE_INSTRUCTIONS if SITE_INSTRUCTIONS.strip() else "(none)"}
@@ -171,7 +194,7 @@ Additional rules and instructions you must follow:
 The site's existing categories are: {category_list}
 
 You must respond with ONLY a JSON object (no markdown fences, no commentary) with exactly these keys:
-  "title": a compelling, specific post title (not generic)
+  "title": a compelling, specific post title (not generic). {parens_instruction}
   "category": the single best-fitting category name for this post. Prefer reusing one of the
               existing categories listed above if one genuinely fits. Only propose a brand new
               category name if none of the existing ones make sense for this post's topic.
@@ -187,6 +210,12 @@ You must respond with ONLY a JSON object (no markdown fences, no commentary) wit
                          by the title -- avoid generic or abstract imagery. Explicitly include
                          words like "photograph" or "photorealistic" in the prompt itself.
                          No text or words should appear in the image.
+                         If the topic involves skin, needles, medical procedures, or bodily
+                         trauma (e.g. tattoos, piercings, injuries, skin conditions), keep the
+                         image clean and professional -- e.g. a studio/clinic setting, tools laid
+                         out, a finished/healed result, or a product shot -- rather than depicting
+                         wounds, blood, or damaged skin, since realistic depictions of those can
+                         get incorrectly flagged as harmful content by the image generator.
                "alt": short accessibility alt text describing the image
 
 The post should be genuinely useful or interesting, around 500-800 words.
@@ -259,13 +288,20 @@ Do not write about any of these recent topics (already covered):
 # Step 3: generate each image
 # ---------------------------------------------------------------------------
 
-def generate_image_bytes(image_prompt):
+def generate_image_bytes(image_prompt, safety_retry=False):
     # Belt-and-suspenders: reinforce photorealism in code, not just via Claude's prompt wording.
     styled_prompt = (
         f"{image_prompt} "
         "Photorealistic photograph, natural lighting, realistic textures and detail, "
         "shot on a real camera -- not a painting, illustration, cartoon, or digital art."
     )
+    if safety_retry:
+        styled_prompt += (
+            " Keep the image clearly clean, professional, and non-graphic -- no wounds, "
+            "blood, damaged skin, or anything that could look like bodily harm. Show a calm, "
+            "well-lit, everyday setting instead (e.g. a clinic, studio, or product shot)."
+        )
+
     payload = {
         "model": IMAGE_MODEL,
         "prompt": styled_prompt,
@@ -277,7 +313,19 @@ def generate_image_bytes(image_prompt):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {OPENAI_API_KEY}",
     }
-    result = http_post_json("https://api.openai.com/v1/images/generations", payload, headers)
+
+    try:
+        result = http_post_json("https://api.openai.com/v1/images/generations", payload, headers)
+    except urllib.error.HTTPError as e:
+        body = getattr(e, "body_text", "")
+        if e.code == 400 and "moderation_blocked" in body:
+            if not safety_retry:
+                print("  Image was blocked by the safety filter; retrying with a safer framing...", file=sys.stderr)
+                return generate_image_bytes(image_prompt, safety_retry=True)
+            print("  Image blocked again even after a safer retry; skipping this image.", file=sys.stderr)
+            return None
+        raise
+
     b64_data = result["data"][0]["b64_json"]
     return base64.b64decode(b64_data)
 
@@ -347,6 +395,14 @@ def build_images_and_insert(title, html_body, image_specs):
         print(f"  Generating image {i}/{len(image_specs)}...")
         raw_bytes = generate_image_bytes(spec["prompt"])
 
+        placeholder = f"[[IMAGE_{i}]]"
+        if raw_bytes is None:
+            # Image generation was blocked/skipped -- just remove its placeholder and move on
+            # rather than failing the whole post.
+            print(f"  Skipping image {i} (generation was blocked); post will continue without it.", file=sys.stderr)
+            html_body = html_body.replace(placeholder, "")
+            continue
+
         if i == 1:
             # Main/featured image: fixed 400x300, floated right in the content.
             final_bytes = resize_and_crop(raw_bytes, MAIN_IMAGE_SIZE)
@@ -366,7 +422,6 @@ def build_images_and_insert(title, html_body, image_specs):
                 f'style="max-width:100%; height:auto; display:block; margin:1.5em auto;" />'
             )
 
-        placeholder = f"[[IMAGE_{i}]]"
         if placeholder in html_body:
             html_body = html_body.replace(placeholder, img_tag)
         elif i == 1:
@@ -413,8 +468,9 @@ def create_wp_post(title, html_body, featured_media_id, category_id):
         "title": title,
         "content": html_body,
         "status": POST_STATUS,
-        "featured_media": featured_media_id,
     }
+    if featured_media_id:
+        payload["featured_media"] = featured_media_id
     if category_id:
         payload["categories"] = [category_id]
     headers = {**wp_auth_header(), "Content-Type": "application/json"}
